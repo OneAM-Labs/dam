@@ -322,10 +322,28 @@ impl SyncProvider for GitHubSync {
         // 5. Get Parent SHA dynamically
         let mut parent_shas = Vec::new();
         let ref_url = format!("https://api.github.com/repos/{}/{}/git/refs/heads/{}", self.owner, self.repo, stream);
+        
         if let Ok(ref_res) = self.client.get(&ref_url).send() {
             if ref_res.status().is_success() {
+                // The branch exists on GitHub, grab its latest commit SHA
                 if let Some(sha_str) = ref_res.json::<serde_json::Value>().ok().and_then(|v| v["object"]["sha"].as_str().map(String::from)) {
                     parent_shas.push(sha_str);
+                }
+            }
+        }
+
+        // 🌟 If this is a brand new branch being pushed to GitHub, we must fetch the 
+        // remote SHA of the branch it was created from (its 'target') to connect the PR diff properly.
+        if parent_shas.is_empty() {
+            let base_stream = meta.target.as_deref().unwrap_or("main");
+            println!("  ↳ Brand new remote stream detected. Stitching history to base stream '{}'...", base_stream);
+            let base_ref_url = format!("https://api.github.com/repos/{}/{}/git/refs/heads/{}", self.owner, self.repo, base_stream);
+            
+            if let Ok(base_res) = self.client.get(&base_ref_url).send() {
+                if base_res.status().is_success() {
+                    if let Some(sha_str) = base_res.json::<serde_json::Value>().ok().and_then(|v| v["object"]["sha"].as_str().map(String::from)) {
+                        parent_shas.push(sha_str);
+                    }
                 }
             }
         }
