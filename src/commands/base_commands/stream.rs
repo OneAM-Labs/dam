@@ -71,7 +71,7 @@ pub fn run(command: Option<StreamCommands>) {
     }
 
     match command {
-        Some(StreamCommands::Create { name, description, owner, priority, target }) => {
+        Some(StreamCommands::Create { name, from, description, owner, priority, target }) => {
             let path = format!(".dam/streams/{}", name);
             if Path::new(&path).exists() {
                 println!("Stream '{}' already exists.", name);
@@ -80,12 +80,17 @@ pub fn run(command: Option<StreamCommands>) {
 
             println!("Creating new stream '{}'...", name);
             
-            let default_priority = if name == "main" { "High" } else { "Normal" };
+            // 🌟 THE FIX: Native Branching
+            // Determine which stream we are branching from to inherit its history graph
+            let base_stream_name = from.unwrap_or_else(|| fs::read_to_string(".dam/CURRENT").unwrap_or_else(|_| "main".to_string()).trim().to_string());
+            let base_meta = get_or_create_meta(&base_stream_name);
+            let starting_seal = base_meta.latest_seal.clone();
             
+            let default_priority = if name == "main" { "High" } else { "Normal" };
             let final_desc = description.unwrap_or_else(|| prompt_user("Description", "Standard workflow stream"));
             let final_owner = owner.unwrap_or_else(|| prompt_user("Owner", &std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())));
             let final_priority = priority.unwrap_or_else(|| prompt_user("Priority", default_priority));
-            let final_target = target.unwrap_or_else(|| prompt_user("Target", "main"));
+            let final_target = target.unwrap_or_else(|| prompt_user("Target", &base_stream_name));
 
             let meta = StreamMeta {
                 name: name.clone(),
@@ -97,11 +102,12 @@ pub fn run(command: Option<StreamCommands>) {
                 target: Some(final_target),
                 goals: vec![],
                 notes: None,
-                latest_seal: None,
+                // 🌟 Inherit the parent's seal! This connects the local history.
+                latest_seal: starting_seal, 
             };
             
             save_meta(&meta);
-            println!("✓ Created new rich stream: {}", name);
+            println!("✓ Created new rich stream: {} (Branched from {})", name, base_stream_name);
         }
         Some(StreamCommands::Inspect { name }) => {
             let target_name = name.unwrap_or_else(|| fs::read_to_string(".dam/CURRENT").unwrap_or_default().trim().to_string());

@@ -275,6 +275,9 @@ pub enum StreamCommands {
     /// Create a new stream with rich continuity metadata
     Create {
         name: String,
+        /// The base stream to branch from (defaults to the currently active stream)
+        #[arg(long)]
+        from: Option<String>,
         #[arg(short, long)]
         description: Option<String>,
         #[arg(short, long)]

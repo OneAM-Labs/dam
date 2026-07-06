@@ -1,7 +1,7 @@
 {
-  "id": "seal_e8f6b6e4",
-  "message": "Added Github Branching Support",
-  "timestamp": "2026-07-06T16:39:19.464536028+00:00",
+  "id": "seal_dcc4952a",
+  "message": "Added gh support for streams bug fix",
+  "timestamp": "2026-07-06T17:12:35.024567624+00:00",
   "files": [
     {
       "path": "Cargo.toml",
@@ -10,7 +10,7 @@
     },
     {
       "path": "src/cli.rs",
-      "hash": "90f1c06caab8404ec30e3ed682e58d242c4cd85d38499abcc05d48deb30caf08",
+      "hash": "6c8ff2781c9303c73c2bd62ecf5b18cd9b75ce5e4f53a42259d1e8834e0e72c6",
       "is_dir": false
     },
     {
@@ -80,7 +80,7 @@
     },
     {
       "path": "src/commands/base_commands/stream.rs",
-      "hash": "97114476e3e107973b1de5eb555a361a1de77751ec886e642037ada5e12ddcb9",
+      "hash": "cbdab59c087f55f97c113b489a6681fc24872d7d3b01efa92a4e6d2e95f7c6d4",
       "is_dir": false
     },
     {
@@ -120,7 +120,7 @@
     },
     {
       "path": "src/platforms/github.rs",
-      "hash": "1fdd28a26bc011586ab8ec03ae7abb6b892f17389e0028dfff94369c074a1a30",
+      "hash": "d2464fb4f3b313c064812dad26413b0f11fc9c203fa5278864b664de63ad98be",
       "is_dir": false
     },
     {
@@ -154,8 +154,6 @@
       "is_dir": false
     }
   ],
-  "stream": "main",
-  "parents": [
-    "seal_2eea4c7a"
-  ]
+  "stream": "gh-stream-impl",
+  "parents": []
 }
