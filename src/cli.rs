@@ -254,12 +254,20 @@ pub enum Commands {
     },
 
     Sync {
+        /// Stream to sync. If omitted, syncs all eligible streams interactively.
+        stream: Option<String>,
+
         /// Action to perform: 'push' or 'pull'. If omitted, interactive diff runs.
+        #[arg(long, short)]
         action: Option<String>,
 
         /// The cloud platform to sync with. Default is 'github'.
         #[arg(long, short)]
         platform: Option<String>,
+
+        /// Force synchronization of the main stream without confirmation.
+        #[arg(long, short)]
+        force: bool,
     },
 }
 #[derive(Subcommand)]
@@ -280,14 +288,37 @@ pub enum StreamCommands {
     Inspect {
         name: Option<String>,
     },
-    /// Set a primary goal for the active stream
-    SetGoal {
-        text: String,
-    },
-
     /// Delete a stream and conditionally its associated seals
     Delete {
         name: String,
+    },
+    /// Manage stream goals
+    Goal {
+        name: String,
+        #[arg(long)]
+        clear: bool,
+        text: Option<String>,
+    },
+    /// Manage stream notes
+    Notes {
+        name: String,
+        #[arg(long)]
+        clear: bool,
+        text: Option<String>,
+    },
+    /// Manage stream description
+    Description {
+        name: String,
+        #[arg(long)]
+        clear: bool,
+        text: Option<String>,
+    },
+    /// Manage stream target branch
+    Target {
+        name: String,
+        #[arg(long)]
+        clear: bool,
+        text: Option<String>,
     }
 }
 

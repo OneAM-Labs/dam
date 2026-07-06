@@ -8,13 +8,18 @@ use crate::cli::StreamCommands;
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct StreamMeta {
     pub name: String,
-    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub owner: String,
     pub priority: String,
     pub status: String,
     pub created_at: String,
-    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub goals: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
     #[serde(default)]
     pub latest_seal: Option<String>,
 }
@@ -29,13 +34,14 @@ pub fn get_or_create_meta(name: &str) -> StreamMeta {
     // Default config values
     StreamMeta {
         name: name.to_string(),
-        description: "Standard workflow stream".to_string(),
+        description: Some("Standard workflow stream".to_string()),
         owner: std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string()),
         priority: if name == "main" { "High".to_string() } else { "Normal".to_string() },
         status: "Active".to_string(),
         created_at: Utc::now().to_rfc3339(),
-        target: "main".to_string(),
+        target: Some("main".to_string()),
         goals: vec![],
+        notes: None,
         latest_seal: None,
     }
 }
@@ -76,7 +82,6 @@ pub fn run(command: Option<StreamCommands>) {
             
             let default_priority = if name == "main" { "High" } else { "Normal" };
             
-            // Interactively prompt for missing values
             let final_desc = description.unwrap_or_else(|| prompt_user("Description", "Standard workflow stream"));
             let final_owner = owner.unwrap_or_else(|| prompt_user("Owner", &std::env::var("USER").unwrap_or_else(|_| "Unknown".to_string())));
             let final_priority = priority.unwrap_or_else(|| prompt_user("Priority", default_priority));
@@ -84,13 +89,14 @@ pub fn run(command: Option<StreamCommands>) {
 
             let meta = StreamMeta {
                 name: name.clone(),
-                description: final_desc,
+                description: Some(final_desc),
                 owner: final_owner,
                 priority: final_priority,
                 status: "Active".to_string(),
                 created_at: Utc::now().to_rfc3339(),
-                target: final_target,
+                target: Some(final_target),
                 goals: vec![],
+                notes: None,
                 latest_seal: None,
             };
             
@@ -104,15 +110,22 @@ pub fn run(command: Option<StreamCommands>) {
                 return;
             }
 
+            let path = format!(".dam/streams/{}", target_name);
+            if !Path::new(&path).exists() {
+                println!("❌ Error: Stream '{}' does not exist. Please create it first using 'dam stream create {}'.", target_name, target_name);
+                return;
+            }
+
             let meta = get_or_create_meta(&target_name);
             println!("\nCurrent Stream");
             println!("{}", meta.name);
             println!("──────────────");
-            println!("Description : {}", meta.description);
+            println!("Description : {}", meta.description.as_deref().unwrap_or("(None)"));
             println!("Owner       : {}", meta.owner);
             println!("Priority    : {}", meta.priority);
-            println!("Target      : {}", meta.target);
+            println!("Target      : {}", meta.target.as_deref().unwrap_or("(None)"));
             println!("Status      : {}", meta.status);
+            println!("Notes       : {}", meta.notes.as_deref().unwrap_or("(None)"));
             
             if let Some(latest) = &meta.latest_seal {
                 println!("Latest Seal : {}", latest);
@@ -127,20 +140,73 @@ pub fn run(command: Option<StreamCommands>) {
                     println!("{}. {}", i + 1, goal);
                 }
             } else {
-                println!("\nGoals: None configured. Use 'dam stream set-goal' to add one.");
+                println!("\nGoals: None configured.");
             }
             println!();
         }
-        Some(StreamCommands::SetGoal { text }) => {
-            let current = fs::read_to_string(".dam/CURRENT").unwrap_or_default().trim().to_string();
-            if current.is_empty() {
-                println!("No active stream to set a goal for.");
+        Some(StreamCommands::Goal { name, clear, text }) => {
+            let path = format!(".dam/streams/{}", name);
+            if !Path::new(&path).exists() {
+                println!("❌ Error: Stream '{}' does not exist. Please create the stream first using 'dam stream create {}'.", name, name);
                 return;
             }
-            let mut meta = get_or_create_meta(&current);
-            meta.goals.push(text.clone());
+            let mut meta = get_or_create_meta(&name);
+            if clear {
+                meta.goals.clear();
+                println!("✓ Cleared goals for stream '{}'", name);
+            } else if let Some(t) = text {
+                meta.goals.push(t.clone());
+                println!("✓ Added goal to stream '{}': {}", name, t);
+            }
             save_meta(&meta);
-            println!("✓ Added goal to stream '{}': {}", current, text);
+        }
+        Some(StreamCommands::Notes { name, clear, text }) => {
+            let path = format!(".dam/streams/{}", name);
+            if !Path::new(&path).exists() {
+                println!("❌ Error: Stream '{}' does not exist. Please create the stream first using 'dam stream create {}'.", name, name);
+                return;
+            }
+            let mut meta = get_or_create_meta(&name);
+            if clear {
+                meta.notes = None;
+                println!("✓ Cleared notes for stream '{}'", name);
+            } else if let Some(t) = text {
+                meta.notes = Some(t.clone());
+                println!("✓ Updated notes for stream '{}'", name);
+            }
+            save_meta(&meta);
+        }
+        Some(StreamCommands::Description { name, clear, text }) => {
+            let path = format!(".dam/streams/{}", name);
+            if !Path::new(&path).exists() {
+                println!("❌ Error: Stream '{}' does not exist. Please create the stream first using 'dam stream create {}'.", name, name);
+                return;
+            }
+            let mut meta = get_or_create_meta(&name);
+            if clear {
+                meta.description = None;
+                println!("✓ Cleared description for stream '{}'", name);
+            } else if let Some(t) = text {
+                meta.description = Some(t.clone());
+                println!("✓ Updated description for stream '{}'", name);
+            }
+            save_meta(&meta);
+        }
+        Some(StreamCommands::Target { name, clear, text }) => {
+            let path = format!(".dam/streams/{}", name);
+            if !Path::new(&path).exists() {
+                println!("❌ Error: Stream '{}' does not exist. Please create the stream first using 'dam stream create {}'.", name, name);
+                return;
+            }
+            let mut meta = get_or_create_meta(&name);
+            if clear {
+                meta.target = None;
+                println!("✓ Cleared target for stream '{}'", name);
+            } else if let Some(t) = text {
+                meta.target = Some(t.clone());
+                println!("✓ Updated target for stream '{}'", name);
+            }
+            save_meta(&meta);
         }
         Some(StreamCommands::Delete { name }) => {
             let current = fs::read_to_string(".dam/CURRENT").unwrap_or_default().trim().to_string();
@@ -154,7 +220,6 @@ pub fn run(command: Option<StreamCommands>) {
                 return;
             }
 
-            // Locate and report all seals committed specifically in this stream
             let seals_dir = Path::new(".dam/seals");
             let mut associated_seals = Vec::new();
             if seals_dir.exists() {

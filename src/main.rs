@@ -132,8 +132,8 @@ fn main() {
         } => {
             commands::settings::run(key, value, interactive);
         }
-        Commands::Sync { action, platform } => {
-            commands::sync::run(action, platform);
+        Commands::Sync { stream, action, platform, force } => {
+            commands::sync::run(stream, action, platform, force);
         }
     }
 }
