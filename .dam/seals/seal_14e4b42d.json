@@ -1,7 +1,7 @@
 {
-  "id": "seal_dcc4952a",
-  "message": "Added gh support for streams bug fix",
-  "timestamp": "2026-07-06T17:12:35.024567624+00:00",
+  "id": "seal_14e4b42d",
+  "message": "added stream improvement for github",
+  "timestamp": "2026-07-06T17:10:53.303658201+00:00",
   "files": [
     {
       "path": "Cargo.toml",
@@ -154,6 +154,8 @@
       "is_dir": false
     }
   ],
-  "stream": "gh-stream-impl",
-  "parents": []
+  "stream": "main",
+  "parents": [
+    "seal_7edf1935"
+  ]
 }
