@@ -11,7 +11,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-const SUPPORTED_VERSIONS: &[&str] = &[env!("CARGO_PKG_VERSION"), "0.3.0"];
+const SUPPORTED_VERSIONS: &[&str] = &[env!("CARGO_PKG_VERSION"), "0.4.0"];
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() {
