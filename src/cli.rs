@@ -272,7 +272,7 @@ pub enum Commands {
 }
 #[derive(Subcommand)]
 pub enum StreamCommands {
-    /// Create a new stream with rich continuity metadata
+    /// Create a new stream with continuity metadata
     Create {
         name: String,
         /// The base stream to branch from (defaults to the currently active stream)
