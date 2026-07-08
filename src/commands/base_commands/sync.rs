@@ -17,15 +17,8 @@ pub fn run(stream: Option<String>, action: Option<String>, platform_arg: Option<
         }
         vec![s]
     } else {
-        let mut streams = Vec::new();
-        if let Ok(entries) = fs::read_dir(".dam/streams") {
-            for entry in entries.flatten() {
-                if let Ok(name) = entry.file_name().into_string() {
-                    streams.push(name);
-                }
-            }
-        }
-        streams
+        let current = fs::read_to_string(".dam/CURRENT").unwrap_or_else(|_| "main".to_string()).trim().to_string();
+        vec![current]
     };
 
     for s in streams_to_sync {
