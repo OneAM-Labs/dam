@@ -13,3 +13,4 @@ pub mod import;
 pub mod settings;
 pub mod sync;
 pub mod merge;
+pub mod creds;

@@ -15,3 +15,4 @@ pub use base_commands::import;
 pub use base_commands::settings;
 pub use base_commands::sync;
 pub use base_commands::merge;
+pub use base_commands::creds;

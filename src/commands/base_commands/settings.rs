@@ -35,7 +35,7 @@ fn display_all_settings(content: &str) {
     println!("suppress_nested_warning            = {}", get_toml_val(content, "suppress_nested_warning").unwrap_or_else(|| "false".to_string()));
     println!("enforce_password_on_project_import = {}", get_toml_val(content, "enforce_password_on_project_import").unwrap_or_else(|| "false".to_string()));
     println!("github_repo                        = \"{}\"", get_toml_val(content, "github_repo").unwrap_or_default());
-    println!("github_token_path                  = \"{}\"", get_toml_val(content, "github_token_path").unwrap_or_default());
+    println!("github_cred_alias                  = \"{}\"", get_toml_val(content, "github_cred_alias").unwrap_or_default());
     println!("\n* Tip: To edit a setting, run: ");
     println!("  dam settings <key> <value>  OR  dam settings --interactive\n");
 }
@@ -96,7 +96,7 @@ fn update_single_setting(content: &str, key: &str, value: &str) {
         "suppress_nested_warning" | "suppress" => ("suppress_nested_warning", false),
         "enforce_password_on_project_import" | "enforce_password" => ("enforce_password_on_project_import", false),
         "github_repo" | "repo" => ("github_repo", true),
-        "github_token_path" | "token_path" => ("github_token_path", true),
+        "github_cred_alias" | "cred_alias" => ("github_cred_alias", true),
         _ => {
             println!("Error: Unsupported setting key '{}'.", key);
             return;
@@ -110,7 +110,6 @@ fn update_single_setting(content: &str, key: &str, value: &str) {
 
     let mut updated_config = set_toml_val(content, clean_key, value, is_string);
     
-    // Automatically disable opposite conflict resolution paths if one is toggled on
     if value == "true" {
         if clean_key == "purities_overrides_impurities" {
             updated_config = set_toml_val(&updated_config, "impurities_overrides_purities", "false", false);
@@ -132,7 +131,7 @@ fn read_single_setting(content: &str, key: &str) {
         "suppress_nested_warning" | "suppress" => "suppress_nested_warning",
         "enforce_password_on_project_import" | "enforce_password" => "enforce_password_on_project_import",
         "github_repo" | "repo" => "github_repo",
-        "github_token_path" | "token_path" => "github_token_path",
+        "github_cred_alias" | "cred_alias" => "github_cred_alias",
         _ => {
             println!("Error: Unsupported setting key '{}'.", key);
             return;
@@ -154,7 +153,7 @@ fn interactive_menu(mut content: String) {
         let current_nested = get_toml_val(&content, "suppress_nested_warning").unwrap_or_else(|| "false".to_string());
         let current_pwd = get_toml_val(&content, "enforce_password_on_project_import").unwrap_or_else(|| "false".to_string());
         let current_repo = get_toml_val(&content, "github_repo").unwrap_or_else(|| "".to_string());
-        let current_token_path = get_toml_val(&content, "github_token_path").unwrap_or_else(|| "".to_string());
+        let current_alias = get_toml_val(&content, "github_cred_alias").unwrap_or_else(|| "".to_string());
 
         println!("\n=======================================================");
         println!("             DAM CONFIGURATION DASHBOARD               ");
@@ -165,7 +164,7 @@ fn interactive_menu(mut content: String) {
         println!(" 4. Suppress Nesting Warnings        : {}", current_nested);
         println!(" 5. Enforce Password Encrypt         : {}", current_pwd);
         println!(" 6. GitHub Repository Target         : {}", if current_repo.is_empty() { "[Not Configured]" } else { &current_repo });
-        println!(" 7. GitHub Custom Token Path         : {}", if current_token_path.is_empty() { "[None - Checks Default Locations]" } else { &current_token_path });
+        println!(" 7. GitHub Credential Alias          : {}", if current_alias.is_empty() { "[Not Configured]" } else { &current_alias });
         println!(" 8. Save and Exit");
         println!("=======================================================");
         print!("Choose option (1-8): ");
@@ -223,16 +222,16 @@ fn interactive_menu(mut content: String) {
                 }
             }
             "7" => {
-                print!("Enter Path to Token File (or press Enter to reset to defaults): ");
+                print!("Enter GitHub Credential Alias (or press Enter to reset to defaults): ");
                 io::stdout().flush().unwrap();
-                let mut next_path = String::new();
-                io::stdin().read_line(&mut next_path).unwrap();
-                let trimmed = next_path.trim();
-                content = set_toml_val(&content, "github_token_path", trimmed, true);
+                let mut next_alias = String::new();
+                io::stdin().read_line(&mut next_alias).unwrap();
+                let trimmed = next_alias.trim();
+                content = set_toml_val(&content, "github_cred_alias", trimmed, true);
                 if trimmed.is_empty() {
-                    println!("GitHub custom token path cleared.");
+                    println!("GitHub credential alias cleared.");
                 } else {
-                    println!("GitHub custom token path set to: {}", trimmed);
+                    println!("GitHub credential alias set to: {}", trimmed);
                 }
             }
             "8" | "" => {
