@@ -1,6 +1,7 @@
 use super::SyncProvider;
 use crate::commands::base_commands::settings::{get_toml_val, set_toml_val};
 use crate::commands::seal::{FileEntry, Seal};
+use crate::core::credentials::{Credential, get_credential, load_aliases, save_credential};
 use base64::{Engine as _, engine::general_purpose};
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
@@ -14,8 +15,6 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type")]
 pub enum AuthMethod {
     FineGrainedToken {
         token: String,
@@ -78,13 +77,11 @@ impl GitHubSync {
     }
 
     fn extract_seal_id(msg: &str, fallback_sha: &str) -> String {
-        // Check clean footer format: [dam:seal_xxxx]
         if let Some(start) = msg.find("[dam:") {
             if let Some(end) = msg[start + 5..].find(']') {
                 return msg[start + 5..start + 5 + end].trim().to_string();
             }
         }
-        // Backward compatibility for legacy prefix format: DAM Sync [seal_xxxx]
         if let Some(start) = msg.find("DAM Sync [") {
             if let Some(end) = msg[start + 10..].find(']') {
                 return msg[start + 10..start + 10 + end].trim().to_string();
@@ -93,59 +90,115 @@ impl GitHubSync {
         format!("seal_git_{}", &fallback_sha[..8])
     }
 
-    fn resolve_auth() -> AuthMethod {
-        let creds_path = ".dam/credentials.json";
-        if let Ok(content) = fs::read_to_string(creds_path) {
-            if let Ok(cred) = serde_json::from_str(&content) {
-                return cred;
-            }
+    fn parse_cred(cred: Credential) -> AuthMethod {
+        match cred.cred_type.as_str() {
+            "SshKey" => AuthMethod::SshKey {
+                key_path: cred.secret,
+                passphrase: cred.extra,
+            },
+            "ClassicToken" => AuthMethod::ClassicToken { token: cred.secret },
+            _ => AuthMethod::FineGrainedToken { token: cred.secret },
         }
+    }
 
-        let legacy_path = ".dam/credentials";
-        if let Ok(token) = fs::read_to_string(legacy_path) {
-            if !token.trim().is_empty() {
-                return AuthMethod::ClassicToken {
-                    token: token.trim().to_string(),
-                };
+    fn resolve_auth() -> AuthMethod {
+        let config_path = ".dam/config.toml";
+        let content = fs::read_to_string(config_path).unwrap_or_default();
+
+        if let Some(alias) = get_toml_val(&content, "github_cred_alias") {
+            if let Ok(cred) =
+                get_credential(&alias, false).or_else(|_| get_credential(&alias, true))
+            {
+                return Self::parse_cred(cred);
             }
         }
 
         println!("\n🔑 Authentication Required for GitHub Provider");
-        println!("Please select your authentication mechanism:");
-        println!("  1. Fine-Grained Personal Access Token (Recommended)");
-        println!("  2. Classic Personal Access Token");
-        println!("  3. SSH Key (Note: Not currently supported via REST provider)");
+        let aliases = load_aliases();
+
+        if !aliases.is_empty() {
+            println!("Existing Credentials (Keychain/Vault):");
+            for (i, alias) in aliases.iter().enumerate() {
+                println!("  {}. {}", i + 1, alias);
+            }
+            println!("  {}. Create a NEW credential", aliases.len() + 1);
+            print!("Choose [1-{}]: ", aliases.len() + 1);
+            io::stdout().flush().unwrap();
+
+            let mut choice = String::new();
+            io::stdin().read_line(&mut choice).unwrap();
+            let choice_idx = choice.trim().parse::<usize>().unwrap_or(0);
+
+            if choice_idx > 0 && choice_idx <= aliases.len() {
+                let chosen_alias = &aliases[choice_idx - 1];
+                let cred = get_credential(chosen_alias, false)
+                    .or_else(|_| get_credential(chosen_alias, true))
+                    .expect("Failed to load credential");
+
+                let updated_content =
+                    set_toml_val(&content, "github_cred_alias", chosen_alias, true);
+                let _ = fs::write(config_path, updated_content);
+                return Self::parse_cred(cred);
+            }
+        }
+
+        println!("Creating new credential...");
+        print!("Enter new alias name (e.g., github_token_main): ");
+        io::stdout().flush().unwrap();
+        let mut alias = String::new();
+        io::stdin().read_line(&mut alias).unwrap();
+        let alias = alias.trim().to_string();
+
+        println!("Select Type:");
+        println!("  1. Fine-Grained Token (Recommended)");
+        println!("  2. Classic Token");
+        println!("  3. SSH Key");
         print!("Choice [1-3]: ");
         io::stdout().flush().unwrap();
-
         let mut choice = String::new();
         io::stdin().read_line(&mut choice).unwrap();
 
-        let cred = match choice.trim() {
+        let (cred_type, secret) = match choice.trim() {
             "3" => {
                 print!("Enter path to private SSH key: ");
                 io::stdout().flush().unwrap();
                 let mut path = String::new();
                 io::stdin().read_line(&mut path).unwrap();
-                AuthMethod::SshKey {
-                    key_path: path.trim().to_string(),
-                    passphrase: None,
-                }
+                ("SshKey", path.trim().to_string())
             }
             _ => {
-                let token_prompt = rpassword::prompt_password("Enter GitHub Token: ").unwrap();
-                let t = token_prompt.trim().to_string();
-                if choice.trim() == "1" {
-                    AuthMethod::FineGrainedToken { token: t }
+                let token = rpassword::prompt_password("Enter GitHub Token: ").unwrap();
+                let ctype = if choice.trim() == "1" {
+                    "FineGrainedToken"
                 } else {
-                    AuthMethod::ClassicToken { token: t }
-                }
+                    "ClassicToken"
+                };
+                (ctype, token.trim().to_string())
             }
         };
 
-        let _ = fs::write(creds_path, serde_json::to_string_pretty(&cred).unwrap());
-        println!("✓ Credentials stored securely in {}", creds_path);
-        cred
+        let cred = Credential {
+            alias: alias.clone(),
+            cred_type: cred_type.to_string(),
+            secret,
+            extra: None,
+        };
+
+        if let Err(e) = save_credential(cred.clone(), false) {
+            println!(
+                "⚠️ OS Keychain failed ({}). Falling back to encrypted Vault...",
+                e
+            );
+            save_credential(cred.clone(), true).expect("Vault save failed");
+            println!("✓ Credential saved to Encrypted Vault.");
+        } else {
+            println!("✓ Credential saved to OS Keychain.");
+        }
+
+        let updated_content = set_toml_val(&content, "github_cred_alias", &alias, true);
+        let _ = fs::write(config_path, updated_content);
+
+        Self::parse_cred(cred)
     }
 
     fn get_target_repo() -> (String, String) {
@@ -363,7 +416,6 @@ impl SyncProvider for GitHubSync {
                 }
             }
         }
-
         // Fetch actual remote paths from GitHub to guarantee deleted files are wiped even during Force Push
         let mut remote_paths = HashSet::new();
         if let Some(ref bg_sha) = base_git_sha {
@@ -441,7 +493,6 @@ impl SyncProvider for GitHubSync {
                 .to_string();
             tree_items.push(serde_json::json!({ "path": file_entry.path, "mode": "100644", "type": "blob", "sha": sha }));
         }
-
         // Explicitly delete files from remote tree that no longer exist in our active seal
         for remote_p in remote_paths {
             if !active_paths.contains(&remote_p) && !remote_p.starts_with(".dam/") {
@@ -535,17 +586,23 @@ impl SyncProvider for GitHubSync {
     fn pull(&self, stream: &str) -> Result<(), Box<dyn Error>> {
         println!("📡 Checking remote Git commits for stream '{}'...", stream);
 
-        let commits_url = format!("https://api.github.com/repos/{}/{}/commits?sha={}", self.owner, self.repo, stream);
+        let commits_url = format!(
+            "https://api.github.com/repos/{}/{}/commits?sha={}",
+            self.owner, self.repo, stream
+        );
         let commits_resp = self.client.get(&commits_url).send()?;
 
         if !commits_resp.status().is_success() {
-            return Err(format!("Could not find remote stream '{}'. Nothing to pull.", stream).into());
+            return Err(format!(
+                "Could not find remote stream '{}'. Nothing to pull.",
+                stream
+            )
+            .into());
         }
 
         let commits: Vec<serde_json::Value> = commits_resp.json()?;
         let mut local_meta = crate::commands::stream::get_or_create_meta(stream);
         let original_local_seal_id = local_meta.latest_seal.clone();
-
         // 1. Gather our local history chain
         let mut local_seals = Vec::new();
         let mut temp_sid = original_local_seal_id.clone();
@@ -559,7 +616,6 @@ impl SyncProvider for GitHubSync {
             }
             break;
         }
-
         // 2. See what commits GitHub has that we don't
         let mut missing_commits = Vec::new();
         let mut remote_head_seal_id = None;
@@ -573,25 +629,31 @@ impl SyncProvider for GitHubSync {
                 remote_head_seal_id = Some(expected_sid.clone());
             }
 
-            if local_seals.contains(&expected_sid) { break; }
+            if local_seals.contains(&expected_sid) {
+                break;
+            }
             missing_commits.push(c.clone());
         }
 
         if missing_commits.is_empty() {
-            println!("✅ Local stream '{}' is already up to date with remote.", stream);
+            println!(
+                "✅ Local stream '{}' is already up to date with remote.",
+                stream
+            );
             return Ok(());
         }
-
         // 3. Check for divergence (We have local seals that remote doesn't know about)
         let is_diverged = if let Some(ref remote_head) = remote_head_seal_id {
             !local_seals.contains(remote_head) && original_local_seal_id.is_some()
         } else {
             false
         };
-
         // 4. Download missing history objects and seals safely to disk first
         missing_commits.reverse();
-        println!("⬇️  Downloading {} missing history commit(s)...", missing_commits.len());
+        println!(
+            "⬇️  Downloading {} missing history commit(s)...",
+            missing_commits.len()
+        );
         fs::create_dir_all(".dam/seals")?;
         fs::create_dir_all(".dam/objects")?;
 
@@ -600,7 +662,10 @@ impl SyncProvider for GitHubSync {
         for commit in missing_commits {
             let commit_sha = commit["sha"].as_str().unwrap();
             let raw_commit_msg = commit["commit"]["message"].as_str().unwrap().to_string();
-            let commit_time = commit["commit"]["author"]["date"].as_str().unwrap().to_string();
+            let commit_time = commit["commit"]["author"]["date"]
+                .as_str()
+                .unwrap()
+                .to_string();
 
             let clean_msg = if let Some(idx) = raw_commit_msg.find("\n\n[dam:") {
                 raw_commit_msg[..idx].to_string()
@@ -608,21 +673,33 @@ impl SyncProvider for GitHubSync {
                 raw_commit_msg.clone()
             };
 
-            let tree_url = format!("https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1", self.owner, self.repo, commit_sha);
+            let tree_url = format!(
+                "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+                self.owner, self.repo, commit_sha
+            );
             let tree_json: serde_json::Value = self.client.get(&tree_url).send()?.json()?;
 
             let mut new_files = Vec::new();
 
             if let Some(tree_arr) = tree_json["tree"].as_array() {
                 for item in tree_arr {
-                    if item["type"] != "blob" { continue; }
+                    if item["type"] != "blob" {
+                        continue;
+                    }
                     let path = item["path"].as_str().unwrap().to_string();
-                    if path.starts_with(".dam/") { continue; }
+                    if path.starts_with(".dam/") {
+                        continue;
+                    }
 
                     let blob_sha = item["sha"].as_str().unwrap();
-                    let blob_url = format!("https://api.github.com/repos/{}/{}/git/blobs/{}", self.owner, self.repo, blob_sha);
+                    let blob_url = format!(
+                        "https://api.github.com/repos/{}/{}/git/blobs/{}",
+                        self.owner, self.repo, blob_sha
+                    );
                     let blob_res = self.client.get(&blob_url).send()?;
-                    if !blob_res.status().is_success() { continue; }
+                    if !blob_res.status().is_success() {
+                        continue;
+                    }
 
                     let blob_json: serde_json::Value = blob_res.json()?;
                     let b64 = blob_json["content"].as_str().unwrap().replace('\n', "");
@@ -640,19 +717,27 @@ impl SyncProvider for GitHubSync {
                         encoder.finish()?;
                     }
 
-                    new_files.push(FileEntry { path, hash: dam_hash, is_dir: false });
+                    new_files.push(FileEntry {
+                        path,
+                        hash: dam_hash,
+                        is_dir: false,
+                    });
                 }
             }
 
             let new_seal_id = Self::extract_seal_id(&raw_commit_msg, commit_sha);
-
             // If we aren't diverged, link to our previous local seal. Otherwise, build remote chain.
             let parent_chain = match current_remote_seal_id.clone() {
                 Some(id) => vec![id],
-                None => if !is_diverged {
-                    original_local_seal_id.clone().map(|s| vec![s]).unwrap_or_default()
-                } else {
-                    vec![]
+                None => {
+                    if !is_diverged {
+                        original_local_seal_id
+                            .clone()
+                            .map(|s| vec![s])
+                            .unwrap_or_default()
+                    } else {
+                        vec![]
+                    }
                 }
             };
 
@@ -669,7 +754,6 @@ impl SyncProvider for GitHubSync {
             fs::write(path, serde_json::to_string_pretty(&new_seal)?)?;
             current_remote_seal_id = Some(new_seal_id);
         }
-
         // 5. INTERACTIVE DIVERGENCE RESOLUTION
         if is_diverged {
             let local_id = original_local_seal_id.as_ref().unwrap();
@@ -679,9 +763,18 @@ impl SyncProvider for GitHubSync {
             println!("--------------------------------------------------");
             println!("Both your local machine and GitHub have new, un-shared seals.");
             println!("All remote seals and files have been safely downloaded to your reservoir.");
-            println!("\nWhich seal do you want to set as the active latest seal for stream '{}'?", stream);
-            println!("  [1] Remote Latest : {} (Use GitHub's timeline)", remote_id);
-            println!("  [2] Local Latest  : {} (Keep your local timeline)", local_id);
+            println!(
+                "\nWhich seal do you want to set as the active latest seal for stream '{}'?",
+                stream
+            );
+            println!(
+                "  [1] Remote Latest : {} (Use GitHub's timeline)",
+                remote_id
+            );
+            println!(
+                "  [2] Local Latest  : {} (Keep your local timeline)",
+                local_id
+            );
             print!("\nEnter your choice (1 or 2): ");
             io::stdout().flush()?;
 
@@ -691,13 +784,25 @@ impl SyncProvider for GitHubSync {
             match choice.trim() {
                 "1" => {
                     local_meta.latest_seal = Some(remote_id.clone());
-                    println!("✓ Updated active stream pointer to Remote Latest ({}).", remote_id);
-                    println!("  Note: Your previous local seal ({}) is still saved in .dam/seals/.", local_id);
+                    println!(
+                        "✓ Updated active stream pointer to Remote Latest ({}).",
+                        remote_id
+                    );
+                    println!(
+                        "  Note: Your previous local seal ({}) is still saved in .dam/seals/.",
+                        local_id
+                    );
                 }
                 "2" | _ => {
-                    // Do nothing to local_meta.latest_seal, keep it pointing to local_id
-                    println!("✓ Kept active stream pointer at Local Latest ({}).", local_id);
-                    println!("  Note: The downloaded remote seal ({}) is saved in .dam/seals/ if you need it later.", remote_id);
+                     // Do nothing to local_meta.latest_seal, keep it pointing to local_id
+                    println!(
+                        "✓ Kept active stream pointer at Local Latest ({}).",
+                        local_id
+                    );
+                    println!(
+                        "  Note: The downloaded remote seal ({}) is saved in .dam/seals/ if you need it later.",
+                        remote_id
+                    );
                 }
             }
         } else {

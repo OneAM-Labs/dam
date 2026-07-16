@@ -252,6 +252,11 @@ pub enum Commands {
         #[arg(long, short)]
         interactive: bool,
     },
+     /// Manage cross-platform credentials using OS Keychain or Encrypted Vault.
+    Creds {
+        #[command(subcommand)]
+        command: CredsCommands,
+    },
 
     Sync {
         /// Stream to sync. If omitted, syncs all eligible streams interactively.
@@ -339,4 +344,28 @@ pub enum ExportTarget {
         #[arg(long)]
         profile: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum CredsCommands {
+    /// Create and store a new credential securely
+    Create {
+        /// Alias for the credential (e.g., github_token_main)
+        #[arg(long)]
+        alias: Option<String>,
+        /// Force saving the credential in the encrypted local vault instead of the OS keychain
+        #[arg(long)]
+        vault: bool,
+    },
+    /// List all known credential aliases
+    List {
+        #[arg(long)]
+        vault: bool,
+    },
+    /// Delete a credential by alias
+    Delete {
+        alias: String,
+        #[arg(long)]
+        vault: bool,
+    }
 }

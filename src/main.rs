@@ -131,7 +131,8 @@ fn main() {
             interactive,
         } => {
             commands::settings::run(key, value, interactive);
-        }
+        },
+        Commands::Creds { command } => commands::creds::run(command),
         Commands::Sync { stream, action, platform, force } => {
             commands::sync::run(stream, action, platform, force);
         }
