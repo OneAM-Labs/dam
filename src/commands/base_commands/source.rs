@@ -63,15 +63,15 @@ pub fn run(name: Option<String>, upgrade: bool) {
             }
         }
 
-        // MIGRATION: Pre-v0.4.1 Credential System Migration
-        if project_version < (0, 4, 1) {
-            println!("-> Applying v0.4.1 credential system updates...");
+        // MIGRATION: Pre-v0.5.0 Credential System Migration
+        if project_version < (0, 5, 0) {
+            println!("-> Applying v0.5.0 credential system updates...");
             let legacy_json = Path::new(".dam/credentials.json");
             let legacy_raw = Path::new(".dam/credentials");
 
             if legacy_json.exists() || legacy_raw.exists() {
                 println!("\n   [Legacy Credentials Detected]");
-                println!("   DAM v0.4.1 introduces a secure, centralized Credential Manager.");
+                println!("   DAM v0.5.0 introduces a secure, centralized Credential Manager.");
                 print!("   Would you like to migrate your old project credentials now? (Y/n): ");
                 io::stdout().flush().unwrap();
                 let mut mig_choice = String::new();
