@@ -23,7 +23,7 @@ fn global_dir() -> PathBuf {
     let home = env::var("HOME")
         .or_else(|_| env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
-    let path = PathBuf::from(home).join(".dam");
+    let path = PathBuf::from(home).join(".damconfig");
     fs::create_dir_all(&path).unwrap_or_default();
     path
 }
