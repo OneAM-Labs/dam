@@ -16,3 +16,4 @@ pub use base_commands::settings;
 pub use base_commands::sync;
 pub use base_commands::merge;
 pub use base_commands::creds;
+pub use base_commands::update;

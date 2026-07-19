@@ -257,7 +257,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: CredsCommands,
     },
-
+    /// Push, pull and sync seal history, stream metadata, and file objects to/from a cloud platform.
     Sync {
         /// Stream to sync. If omitted, syncs all eligible streams interactively.
         stream: Option<String>,
@@ -274,6 +274,12 @@ pub enum Commands {
         #[arg(long, short)]
         force: bool,
     },
+
+    /// Check for CLI updates and view the latest release details.
+    /// 
+    /// This will manually fetch the latest version from the DAM update server and 
+    /// compare it against your local version.
+    Update,
 }
 #[derive(Subcommand)]
 pub enum StreamCommands {
