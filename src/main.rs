@@ -8,14 +8,187 @@ use clap::Parser;
 use cli::{Cli, Commands};
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Write, IsTerminal};
 use std::path::{Path, PathBuf};
 
-const SUPPORTED_VERSIONS: &[&str] = &[env!("CARGO_PKG_VERSION"), "0.5.0"];
+const SUPPORTED_VERSIONS: &[&str] = &[env!("CARGO_PKG_VERSION"), "0.5.0", "0.5.1"];
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// --- TERMINAL COLOR SUPPORT FOR PATH WARNINGS --- //
+
+#[cfg(windows)]
+fn enable_windows_ansi_support() -> bool {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+        STD_OUTPUT_HANDLE,
+    };
+
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if handle == INVALID_HANDLE_VALUE || handle == 0 {
+            return false;
+        }
+
+        let mut mode: u32 = 0;
+        if GetConsoleMode(handle, &mut mode) == 0 {
+            return true;
+        }
+
+        if mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0 {
+            return true;
+        }
+
+        SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+    }
+}
+
+#[cfg(not(windows))]
+fn enable_windows_ansi_support() -> bool {
+    true
+}
+
+fn supports_color() -> bool {
+    if env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+
+    if let Some(force) = env::var_os("CLICOLOR_FORCE") {
+        if force != "0" {
+            return true;
+        }
+    }
+
+    if let Ok(term) = env::var("TERM") {
+        if term == "dumb" {
+            return false;
+        }
+    }
+
+    io::stdout().is_terminal() && enable_windows_ansi_support()
+}
+
+struct Colors {
+    bold: &'static str,
+    reset: &'static str,
+    yellow: &'static str,
+    cyan: &'static str,
+    green: &'static str,
+    dim: &'static str,
+}
+
+impl Colors {
+    fn detect() -> Self {
+        if supports_color() {
+            Colors {
+                bold: "\x1b[1m",
+                reset: "\x1b[0m",
+                yellow: "\x1b[1;33m",
+                cyan: "\x1b[36m",
+                green: "\x1b[32m",
+                dim: "\x1b[2m",
+            }
+        } else {
+            Colors {
+                bold: "",
+                reset: "",
+                yellow: "",
+                cyan: "",
+                green: "",
+                dim: "",
+            }
+        }
+    }
+}
+
+fn get_global_marker_path() -> Option<PathBuf> {
+    let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"))?;
+    Some(PathBuf::from(home).join(".dam_ignore_path_warning"))
+}
+
+fn check_and_warn_path() {
+    // Skip check if user explicitly disabled it via env var
+    if env::var_os("DAM_DISABLE_PATH_CHECK").is_some() {
+        return;
+    }
+
+    // Skip if user permanently suppressed it via marker file
+    if let Some(marker) = get_global_marker_path() {
+        if marker.exists() {
+            return;
+        }
+    }
+
+    // Get the exact path of the currently executing binary
+    let current_exe = match env::current_exe() {
+        Ok(exe) => exe,
+        Err(_) => return, // Fail silently if we can't determine the execution path
+    };
+
+    let canonical_current = fs::canonicalize(&current_exe).unwrap_or_else(|_| current_exe.clone());
+    let exe_name = current_exe.file_name().unwrap_or_default();
+    
+    // Scan the system PATH for this executable name
+    let mut in_path = false;
+    if let Some(paths) = env::var_os("PATH") {
+        for dir in env::split_paths(&paths) {
+            let candidate = dir.join(&exe_name);
+            if candidate.exists() {
+                // Ensure the file in PATH isn't a symlink or another file masking as DAM
+                if let Ok(canonical_candidate) = fs::canonicalize(&candidate) {
+                    if canonical_candidate == canonical_current {
+                        in_path = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // If it's not in the PATH, generate an OS-specific warning with an interactive prompt
+    if !in_path {
+        if let Some(exe_dir) = current_exe.parent() {
+            let dir_str = exe_dir.display();
+            let c = Colors::detect();
+
+            println!("{}⚠️  Warning: The 'dam' executable is not in your system PATH.{}", c.yellow, c.reset);
+            println!("You are currently running it directly from: {}{}{}", c.cyan, dir_str, c.reset);
+            println!("To run 'dam' from anywhere, please add its folder to your PATH.\n");
+            
+            #[cfg(target_os = "windows")]
+            {
+                println!("To add it on {}Windows{}, run this in PowerShell:", c.bold, c.reset);
+                println!("  {}[Environment]::SetEnvironmentVariable(\"Path\", $env:Path + \";{}\", \"User\"){}\n", c.green, dir_str, c.reset);
+            }
+            
+            #[cfg(not(target_os = "windows"))]
+            {
+                println!("To add it on {}macOS / Linux{}, run this in your terminal:", c.bold, c.reset);
+                println!("  {}echo 'export PATH=\"$PATH:{}\"' >> ~/.zshrc{}", c.green, dir_str, c.reset);
+                println!("  {}(Replace ~/.zshrc with ~/.bashrc if you use bash){}\n", c.dim, c.reset);
+            }
+            
+            print!("Would you like to permanently hide this warning? (y/N): ");
+            io::stdout().flush().unwrap();
+            
+            let mut input = String::new();
+            if io::stdin().read_line(&mut input).is_ok() && input.trim().eq_ignore_ascii_case("y") {
+                if let Some(marker) = get_global_marker_path() {
+                    let _ = fs::write(marker, "1");
+                    println!("{}✅ Warning permanently suppressed.{}\n", c.green, c.reset);
+                }
+            } else {
+                println!("{}(You can also hide this manually by setting DAM_DISABLE_PATH_CHECK=1){}\n", c.dim, c.reset);
+            }
+        }
+    }
+}
 
 fn main() {
     let cli = Cli::parse();
+    
+    check_and_warn_path();
+
     let original_cwd = env::current_dir().unwrap();
 
     // The 'source' command handles its own initialization logic safely in the current dir.
@@ -47,6 +220,11 @@ fn main() {
                 println!("⚠️  Please run `dam source --upgrade` to migrate your project structure to the latest version.\n");
             }
         }
+    }
+
+    // Trigger automatic background update check unless running manual update command.
+    if !matches!(cli.command, Commands::Update) {
+        commands::update::auto_check();
     }
 
     match cli.command {
@@ -135,6 +313,9 @@ fn main() {
         Commands::Creds { command } => commands::creds::run(command),
         Commands::Sync { stream, action, platform, force } => {
             commands::sync::run(stream, action, platform, force);
+        },
+        Commands::Update => {
+            commands::update::run();
         }
     }
 }
