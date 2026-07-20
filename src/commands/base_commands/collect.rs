@@ -145,6 +145,10 @@ pub fn run(
     let mut items_to_collect = Vec::new();
     let mut conflicts = Vec::new();
 
+    // Pre-load all ancestor rules before executing discovery so explicitly targeted directories
+    // don't blind-skip the rules set by the root or parent directories.
+    load_ancestor_rules(target_path, &mut rules);
+
     if target_path.is_file() {
         collect_single_file(target_path, &mut items_to_collect, &mut rules);
     } else {
@@ -153,6 +157,7 @@ pub fn run(
             &mut items_to_collect,
             &mut conflicts,
             &mut rules,
+            true, // This is an explicit target, enable the override prompt
         );
     }
 
@@ -236,6 +241,47 @@ pub fn run(
     );
 }
 
+fn load_ancestor_rules(target_path: &Path, rules: &mut RuleSet) {
+    let path_str = target_path.to_string_lossy();
+    // If the target is the root itself, discover_items will handle loading it.
+    let is_root = path_str == "." || path_str == "./" || path_str.is_empty();
+
+    if !is_root {
+        // 1. Always load root rules first
+        if rules.dynamic_purities {
+            load_rules_from_file(Path::new(".purities"), "", &mut rules.purities);
+        }
+        if rules.dynamic_impurities {
+            load_rules_from_file(Path::new(".impurities"), "", &mut rules.impurities);
+        }
+
+        // 2. Progressively load rules down the ancestor chain
+        let mut accum_path = std::path::PathBuf::new();
+        if let Some(parent) = target_path.parent() {
+            for component in parent.components() {
+                let comp_str = component.as_os_str().to_string_lossy();
+                if comp_str == "." {
+                    continue;
+                }
+
+                accum_path.push(component);
+                
+                let mut dir_prefix = accum_path.to_string_lossy().replace('\\', "/");
+                if !dir_prefix.is_empty() && !dir_prefix.ends_with('/') {
+                    dir_prefix.push('/');
+                }
+
+                if rules.dynamic_purities {
+                    load_rules_from_file(&accum_path.join(".purities"), &dir_prefix, &mut rules.purities);
+                }
+                if rules.dynamic_impurities {
+                    load_rules_from_file(&accum_path.join(".impurities"), &dir_prefix, &mut rules.impurities);
+                }
+            }
+        }
+    }
+}
+
 fn set_config_preference(config_path: &str, content: &str, p_win: bool, i_win: bool) {
     let mut lines: Vec<String> = content
         .lines()
@@ -290,26 +336,8 @@ fn collect_single_file(path: &Path, item_list: &mut Vec<String>, rules: &mut Rul
         clean_path = clean_path[2..].to_string();
     }
 
-    if let Some(parent) = path.parent() {
-        let mut dir_prefix = parent.to_string_lossy().replace('\\', "/");
-        if dir_prefix == "." {
-            dir_prefix.clear();
-        }
-        if !dir_prefix.is_empty() {
-            dir_prefix.push('/');
-        }
-
-        if rules.dynamic_purities {
-            load_rules_from_file(&parent.join(".purities"), &dir_prefix, &mut rules.purities);
-        }
-        if rules.dynamic_impurities {
-            load_rules_from_file(
-                &parent.join(".impurities"),
-                &dir_prefix,
-                &mut rules.impurities,
-            );
-        }
-    }
+    // load_ancestor_rules now handles gathering the relevant rules beforehand,
+    // so we no longer need to check parent directory contents here.
 
     let has_purities_rules = !rules.purities.is_empty();
     let is_pure = rules.purities.iter().any(|r| r.matches(&clean_path));
@@ -356,6 +384,7 @@ fn discover_items(
     item_list: &mut Vec<String>,
     conflicts: &mut Vec<String>,
     current_rules: &mut RuleSet,
+    is_explicit_target: bool,
 ) {
     if path.components().any(|c| c.as_os_str() == ".dam") {
         return;
@@ -380,22 +409,61 @@ fn discover_items(
             .impurities
             .iter()
             .any(|r| r.matches(&dir_prefix));
-        if is_dir_impure && current_rules.purities.is_empty() {
-            return;
-        }
-
         let has_purities_rules = !current_rules.purities.is_empty();
-        if has_purities_rules {
+
+        let mut should_block = false;
+        let mut block_reason = "";
+
+        if is_dir_impure && !has_purities_rules {
+            should_block = true;
+            block_reason = "matches an .impurities blocklist rule";
+        } else if has_purities_rules {
             let dir_allowed = current_rules
                 .purities
                 .iter()
                 .any(|r| r.matches(&dir_prefix) || r.pattern.starts_with(&dir_prefix));
             if !dir_allowed {
-                return;
+                should_block = true;
+                block_reason = "does not match any .purities allowlist rule";
             }
         }
 
-        let mut local_rules = current_rules.clone();
+        let mut override_granted = false;
+
+        // Override logic only kicks in for explicitly targeted folders breaking rules
+        if should_block {
+            if is_explicit_target && !path_str.is_empty() {
+                println!("\n[!] DIRECTORY RULE WARNING [!]");
+                println!("The targeted directory '{}' {}.", path_str, block_reason);
+                print!("Do you want to explicitly include it and scan its contents anyway? (y/N): ");
+                io::stdout().flush().unwrap();
+
+                let mut input = String::new();
+                io::stdin().read_line(&mut input).unwrap();
+
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("Directory excluded.");
+                    return;
+                }
+                println!("Directory explicitly included for this collection run.");
+                override_granted = true;
+            } else {
+                return; // Silently ignore standard recursive subdirectories
+            }
+        }
+
+        // Clean slate the inherited rules *only* if an explicit override was granted,
+        // otherwise maintain strict global rules for the files inside.
+        let mut local_rules = if override_granted {
+            RuleSet {
+                purities: Vec::new(),
+                impurities: Vec::new(),
+                dynamic_purities: current_rules.dynamic_purities,
+                dynamic_impurities: current_rules.dynamic_impurities,
+            }
+        } else {
+            current_rules.clone()
+        };
 
         if local_rules.dynamic_purities {
             load_rules_from_file(
@@ -419,7 +487,8 @@ fn discover_items(
                 evaluate_and_push(&dir_prefix, item_list, conflicts, &local_rules);
             } else {
                 for entry in entries {
-                    discover_items(&entry.path(), item_list, conflicts, &mut local_rules);
+                    // Pass false to ensure nested subdirectories remain silent upon failure
+                    discover_items(&entry.path(), item_list, conflicts, &mut local_rules, false);
                 }
             }
         }
