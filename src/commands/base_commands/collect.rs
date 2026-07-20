@@ -284,11 +284,6 @@ fn load_rules_from_file(path: &Path, base_dir: &str, target_vec: &mut Vec<Rule>)
     }
 }
 
-/// Handles `dam collect <filename>` when the target is a single file rather than a
-/// directory. `discover_items` only loads `.purities`/`.impurities` while walking
-/// directories, so a directly-named file would otherwise skip rule checking entirely.
-/// This loads the rules from the file's own directory and, if the file doesn't pass
-/// them, asks for explicit confirmation instead of silently including or dropping it.
 fn collect_single_file(path: &Path, item_list: &mut Vec<String>, rules: &mut RuleSet) {
     let mut clean_path = path.to_string_lossy().replace('\\', "/");
     if clean_path.starts_with("./") {
