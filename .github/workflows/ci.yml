@@ -7,7 +7,19 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    
+    
+    strategy:
+      # fail fast ensures that one os build failing doesnt stop the other OS builds
+      fail-fast: false 
+      
+      # target OSes 
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    # runs on must be after matrix is defined to use it
+    runs-on: ${{ matrix.os }}
+        
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
