@@ -145,12 +145,16 @@ pub fn run(
     let mut items_to_collect = Vec::new();
     let mut conflicts = Vec::new();
 
-    discover_items(
-        target_path,
-        &mut items_to_collect,
-        &mut conflicts,
-        &mut rules,
-    );
+    if target_path.is_file() {
+        collect_single_file(target_path, &mut items_to_collect, &mut rules);
+    } else {
+        discover_items(
+            target_path,
+            &mut items_to_collect,
+            &mut conflicts,
+            &mut rules,
+        );
+    }
 
     // --- Conflict Resolution Phase ---
     if !conflicts.is_empty() {
@@ -277,6 +281,78 @@ fn load_rules_from_file(path: &Path, base_dir: &str, target_vec: &mut Vec<Rule>)
                 });
             }
         }
+    }
+}
+
+/// Handles `dam collect <filename>` when the target is a single file rather than a
+/// directory. `discover_items` only loads `.purities`/`.impurities` while walking
+/// directories, so a directly-named file would otherwise skip rule checking entirely.
+/// This loads the rules from the file's own directory and, if the file doesn't pass
+/// them, asks for explicit confirmation instead of silently including or dropping it.
+fn collect_single_file(path: &Path, item_list: &mut Vec<String>, rules: &mut RuleSet) {
+    let mut clean_path = path.to_string_lossy().replace('\\', "/");
+    if clean_path.starts_with("./") {
+        clean_path = clean_path[2..].to_string();
+    }
+
+    if let Some(parent) = path.parent() {
+        let mut dir_prefix = parent.to_string_lossy().replace('\\', "/");
+        if dir_prefix == "." {
+            dir_prefix.clear();
+        }
+        if !dir_prefix.is_empty() {
+            dir_prefix.push('/');
+        }
+
+        if rules.dynamic_purities {
+            load_rules_from_file(&parent.join(".purities"), &dir_prefix, &mut rules.purities);
+        }
+        if rules.dynamic_impurities {
+            load_rules_from_file(
+                &parent.join(".impurities"),
+                &dir_prefix,
+                &mut rules.impurities,
+            );
+        }
+    }
+
+    let has_purities_rules = !rules.purities.is_empty();
+    let is_pure = rules.purities.iter().any(|r| r.matches(&clean_path));
+    let is_impure = rules.impurities.iter().any(|r| r.matches(&clean_path));
+
+    let passes = if has_purities_rules {
+        is_pure && !is_impure
+    } else {
+        !is_impure
+    };
+
+    if passes {
+        item_list.push(clean_path);
+        return;
+    }
+
+    println!("\n[!] RULE WARNING [!]");
+    if has_purities_rules && !is_pure {
+        println!(
+            "'{}' does not match any .purities allowlist rule.",
+            clean_path
+        );
+    }
+    if is_impure {
+        println!("'{}' matches an .impurities blocklist rule.", clean_path);
+    }
+
+    print!("Do you want to explicitly include it anyway? (y/N): ");
+    io::stdout().flush().unwrap();
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).unwrap();
+
+    if input.trim().eq_ignore_ascii_case("y") {
+        item_list.push(clean_path);
+        println!("File explicitly included for this collection run.");
+    } else {
+        println!("File excluded.");
     }
 }
 
