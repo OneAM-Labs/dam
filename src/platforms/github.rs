@@ -1,8 +1,9 @@
-use super::SyncProvider;
+use super::{PullRequestInfo, SyncProvider};
 use crate::commands::base_commands::settings::{get_toml_val, set_toml_val};
 use crate::commands::seal::{FileEntry, Seal};
 use crate::core::credentials::{Credential, get_credential, load_aliases, save_credential};
 use base64::{Engine as _, engine::general_purpose};
+use chrono::Utc;
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -815,5 +816,132 @@ impl SyncProvider for GitHubSync {
         crate::commands::stream::save_meta(&local_meta);
         println!("✓ Sync operation finished for stream '{}'.", stream);
         Ok(())
+    }
+
+    fn list_pull_requests(&self) -> Result<Vec<PullRequestInfo>, Box<dyn Error>> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/pulls?state=open&per_page=100",
+            self.owner, self.repo
+        );
+        let resp = self.client.get(&url).send()?;
+        if !resp.status().is_success() {
+            return Err(format!("Failed to list pull requests: {}", resp.text()?).into());
+        }
+
+        let prs: Vec<serde_json::Value> = resp.json()?;
+        Ok(prs
+            .iter()
+            .map(|p| PullRequestInfo {
+                number: p["number"].as_u64().unwrap_or(0),
+                title: p["title"].as_str().unwrap_or("").to_string(),
+                author: p["user"]["login"].as_str().unwrap_or("unknown").to_string(),
+                head_ref: p["head"]["ref"].as_str().unwrap_or("").to_string(),
+            })
+            .collect())
+    }
+
+    fn checkout_pull_request(&self, number: u64) -> Result<String, Box<dyn Error>> {
+        let pr_url = format!(
+            "https://api.github.com/repos/{}/{}/pulls/{}",
+            self.owner, self.repo, number
+        );
+        let resp = self.client.get(&pr_url).send()?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "Pull request #{} not found or inaccessible: {}",
+                number,
+                resp.text()?
+            )
+            .into());
+        }
+
+        let pr: serde_json::Value = resp.json()?;
+        let head_sha = pr["head"]["sha"]
+            .as_str()
+            .ok_or("Pull request has no head commit")?
+            .to_string();
+        let head_ref = pr["head"]["ref"].as_str().unwrap_or("unknown").to_string();
+        let title = pr["title"].as_str().unwrap_or("").to_string();
+
+        println!(
+            "📥 Fetching PR #{} ('{}', branch '{}')...",
+            number, title, head_ref
+        );
+
+        let tree_url = format!(
+            "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+            self.owner, self.repo, head_sha
+        );
+        let tree_json: serde_json::Value = self.client.get(&tree_url).send()?.json()?;
+
+        fs::create_dir_all(".dam/objects")?;
+        let mut files = Vec::new();
+
+        if let Some(tree_arr) = tree_json["tree"].as_array() {
+            for item in tree_arr {
+                if item["type"] != "blob" {
+                    continue;
+                }
+                let path = item["path"].as_str().unwrap_or("").to_string();
+                if path.starts_with(".dam/") {
+                    continue;
+                }
+
+                let blob_sha = item["sha"].as_str().unwrap_or("");
+                let blob_url = format!(
+                    "https://api.github.com/repos/{}/{}/git/blobs/{}",
+                    self.owner, self.repo, blob_sha
+                );
+                let blob_res = self.client.get(&blob_url).send()?;
+                if !blob_res.status().is_success() {
+                    continue;
+                }
+
+                let blob_json: serde_json::Value = blob_res.json()?;
+                let b64 = blob_json["content"].as_str().unwrap_or("").replace('\n', "");
+                let raw_data = general_purpose::STANDARD.decode(&b64)?;
+
+                let mut hasher = Sha256::new();
+                hasher.update(&raw_data);
+                let dam_hash = format!("{:x}", hasher.finalize());
+
+                let dest_obj = Path::new(".dam/objects").join(&dam_hash);
+                if !dest_obj.exists() {
+                    let compressed_file = File::create(&dest_obj)?;
+                    let mut encoder = ZlibEncoder::new(compressed_file, Compression::default());
+                    encoder.write_all(&raw_data)?;
+                    encoder.finish()?;
+                }
+
+                files.push(FileEntry {
+                    path,
+                    hash: dam_hash,
+                    is_dir: false,
+                });
+            }
+        }
+
+        let stream_name = format!("pr-{}", number);
+        let seal_id = format!("seal_pr{}", &head_sha[..head_sha.len().min(8)]);
+
+        let seal = Seal {
+            id: seal_id.clone(),
+            message: format!("Checked out PR #{}: {}", number, title),
+            timestamp: Utc::now().to_rfc3339(),
+            files,
+            stream: stream_name.clone(),
+            parents: vec![],
+        };
+        fs::write(
+            format!(".dam/seals/{}.json", seal_id),
+            serde_json::to_string_pretty(&seal)?,
+        )?;
+
+        let mut meta = crate::commands::stream::get_or_create_meta(&stream_name);
+        meta.latest_seal = Some(seal_id);
+        meta.description = Some(format!("Checked out from PR #{} ({})", number, head_ref));
+        crate::commands::stream::save_meta(&meta);
+
+        Ok(stream_name)
     }
 }

@@ -276,10 +276,27 @@ pub enum Commands {
     },
 
     /// Check for CLI updates and view the latest release details.
-    /// 
-    /// This will manually fetch the latest version from the DAM update server and 
+    ///
+    /// This will manually fetch the latest version from the DAM update server and
     /// compare it against your local version.
     Update,
+
+    /// List open pull requests, or check one out into its own local stream.
+    ///
+    /// Fetches open pull requests from the configured GitHub repository. Checking one
+    /// out downloads its head commit into a brand new stream (never touching your
+    /// existing streams), so you can inspect or build a contributor's changes locally.
+    /// If your active stream has uncommitted collected files, you'll be offered a
+    /// safety seal first so checking out a PR can never cost you local work.
+    ///
+    /// EXAMPLES:
+    ///   dam pr                # Interactively list PRs and choose one to check out
+    ///   dam pr list           # Just list open pull requests
+    ///   dam pr checkout 19    # Check out PR #19 directly into stream 'pr-19'
+    Pr {
+        #[command(subcommand)]
+        command: Option<PrCommands>,
+    },
 }
 #[derive(Subcommand)]
 pub enum StreamCommands {
@@ -374,4 +391,12 @@ pub enum CredsCommands {
         #[arg(long)]
         vault: bool,
     }
+}
+
+#[derive(Subcommand)]
+pub enum PrCommands {
+    /// List open pull requests on the configured remote repository
+    List,
+    /// Check out a specific pull request number into a new local stream
+    Checkout { number: u64 },
 }
