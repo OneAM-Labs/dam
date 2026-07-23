@@ -317,6 +317,7 @@ fn main() {
         Commands::Update => {
             commands::update::run();
         }
+        Commands::Pr { command } => commands::pr::run(command),
     }
 }
 

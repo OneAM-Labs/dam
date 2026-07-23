@@ -15,3 +15,4 @@ pub mod sync;
 pub mod merge;
 pub mod creds;
 pub mod update;
+pub mod pr;
