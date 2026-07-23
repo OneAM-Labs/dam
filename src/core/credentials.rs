@@ -1,11 +1,5 @@
-use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes256Gcm, Key, Nonce,
-};
-use pbkdf2::pbkdf2_hmac;
-use rand::{thread_rng, RngCore};
+use crate::core::crypto::{encrypt,decrypt};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -61,59 +55,31 @@ fn get_vault_password() -> String {
     rpassword::prompt_password("Enter Vault Master Password: ").unwrap_or_default()
 }
 
-pub fn encrypt_vault(data: &str, password: &str) -> Vec<u8> {
-    let mut salt = [0u8; 16];
-    thread_rng().fill_bytes(&mut salt);
-    let mut key = [0u8; 32];
-    pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, 100_000, &mut key);
-
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
-    let mut nonce_bytes = [0u8; 12];
-    thread_rng().fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher.encrypt(nonce, data.as_bytes()).expect("encryption failure");
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&salt);
-    out.extend_from_slice(&nonce_bytes);
-    out.extend_from_slice(&ciphertext);
-    out
-}
-
-pub fn decrypt_vault(data: &[u8], password: &str) -> Result<String, String> {
-    if data.len() < 28 {
-        return Err("Invalid vault data".into());
-    }
-    let salt = &data[0..16];
-    let nonce_bytes = &data[16..28];
-    let ciphertext = &data[28..];
-
-    let mut key = [0u8; 32];
-    pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, 100_000, &mut key);
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
-    let nonce = Nonce::from_slice(nonce_bytes);
-
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| "Invalid password or corrupted vault")?;
-    String::from_utf8(plaintext).map_err(|_| "Invalid UTF-8 in vault".into())
-}
-
 fn load_vault(password: &str) -> Result<HashMap<String, Credential>, String> {
     let path = global_dir().join("vault.bin");
     if !path.exists() {
         return Ok(HashMap::new());
     }
     let data = fs::read(&path).map_err(|e| e.to_string())?;
-    let json = decrypt_vault(&data, password)?;
-    serde_json::from_str(&json).map_err(|e| e.to_string())
+
+    let json = decrypt(&data, password)
+        .map_err(|e| e.to_string())?;
+
+    let map = serde_json::from_slice(&json)
+        .map_err(|e| e.to_string())?;
+
+    Ok(map)
 }
 
 fn save_vault(map: &HashMap<String, Credential>, password: &str) -> Result<(), String> {
-    let json = serde_json::to_string(map).map_err(|e| e.to_string())?;
-    let encrypted = encrypt_vault(&json, password);
-    fs::write(global_dir().join("vault.bin"), encrypted).map_err(|e| e.to_string())
+    let json = serde_json::to_vec(map)
+    .map_err(|e| e.to_string())?;
+
+    let encrypted = encrypt(&json, password)
+        .map_err(|e| e.to_string())?;
+
+    fs::write(global_dir().join("vault.bin"), encrypted)
+        .map_err(|e| e.to_string())
 }
 
 pub fn save_credential(cred: Credential, use_vault: bool) -> Result<(), String> {
