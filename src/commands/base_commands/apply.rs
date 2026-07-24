@@ -4,6 +4,14 @@ use std::path::Path;
 use serde_json;
 use crate::commands::seal;
 use flate2::read::ZlibDecoder;
+use sha2::{Digest, Sha256};
+
+fn hash_file(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    io::copy(&mut file, &mut hasher).ok()?;
+    Some(format!("{:x}", hasher.finalize()))
+}
 
 pub fn run(seal_id: String, preview: bool) {
     let seal_meta_path = format!(".dam/seals/{}.json", seal_id);
@@ -48,6 +56,40 @@ pub fn run(seal_id: String, preview: bool) {
             
             let final_msg = if msg.is_empty() { &fallback_msg } else { msg };
             seal::run(final_msg.to_string(),Vec::new());
+        }
+    }
+
+    let mut changed_locally = Vec::new();
+    for entry in &seal.files {
+        if entry.is_dir {
+            continue;
+        }
+        let workspace_target = Path::new(&entry.path);
+        if workspace_target.exists() {
+            if let Some(current_hash) = hash_file(workspace_target) {
+                if current_hash != entry.hash {
+                    changed_locally.push(entry.path.clone());
+                }
+            }
+        }
+    }
+
+    if !changed_locally.is_empty() {
+        println!(
+            "\n⚠️  WARNING: The following files have local changes that don't match seal {}:",
+            seal_id
+        );
+        for path in &changed_locally {
+            println!("  - {}", path);
+        }
+        print!("Overwrite these files anyway? (y/N): ");
+        io::stdout().flush().unwrap();
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted. No files were changed.");
+            return;
         }
     }
 
