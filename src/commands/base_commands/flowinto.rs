@@ -1,7 +1,9 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use crate::commands::apply;
 use crate::commands::seal;
+use crate::commands::stream;
 
 pub fn run(name: String) {
     let path = format!(".dam/streams/{}", name);
@@ -32,4 +34,9 @@ pub fn run(name: String) {
 
     fs::write(".dam/CURRENT", &name).unwrap();
     println!("🌊 Flow successfully moved to workspace: {}", name);
+
+    let meta = stream::get_or_create_meta(&name);
+    if let Some(seal_id) = meta.latest_seal {
+        apply::run(seal_id, false);
+    }
 }
