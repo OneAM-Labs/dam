@@ -45,6 +45,13 @@ fn with_spinner<R, F: FnOnce() -> R>(verbose: bool, message: &str, f: F) -> R {
     result
 }
 
+/// Plain output with no spinner: push prints its own per-file progress, and a spinner's
+/// `\r` redraw would overwrite it (and print "done" even when the push failed).
+fn with_progress<R, F: FnOnce() -> R>(message: &str, f: F) -> R {
+    println!("{}", message);
+    f()
+}
+
 fn without_spinner<R, F: FnOnce() -> R>(verbose: bool, message: &str, f: F) -> R {
     if verbose {
         println!("{}", message);
@@ -122,7 +129,7 @@ pub fn run(
         if let Some(ref act) = action {
             match act.to_lowercase().as_str() {
                 "push" => {
-                    let result = with_spinner(verbose, &format!("Pushing stream '{}'...", s), || provider.push(&s));
+                    let result = with_progress(&format!("Pushing stream '{}'...", s), || provider.push(&s));
                     if let Err(e) = result {
                         println!("❌ Push failed for {}: {}", s, e);
                     }
@@ -178,7 +185,7 @@ pub fn run(
                             verify_sync_status(&*provider, &s, verbose);
                         }
                     } else if choice.trim() == "2" {
-                        let result = with_spinner(verbose, &format!("Pushing stream '{}'...", s), || provider.push(&s));
+                        let result = with_progress(&format!("Pushing stream '{}'...", s), || provider.push(&s));
                         if let Err(e) = result {
                             println!("❌ Push failed: {}", e);
                         } else {
@@ -191,7 +198,7 @@ pub fn run(
                     let mut choice = String::new();
                     io::stdin().read_line(&mut choice).unwrap();
                     if choice.trim().to_lowercase() != "n" {
-                        let result = with_spinner(verbose, &format!("Pushing stream '{}'...", s), || provider.push(&s));
+                        let result = with_progress(&format!("Pushing stream '{}'...", s), || provider.push(&s));
                         if let Err(e) = result {
                             println!("❌ Push failed: {}", e);
                         } else {
