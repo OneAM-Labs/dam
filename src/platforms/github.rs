@@ -14,7 +14,25 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const MAX_BLOB_BYTES: usize = 100 * 1024 * 1024; // GitHub hard limit
+const WARN_BLOB_BYTES: usize = 50 * 1024 * 1024;
+const MAX_ATTEMPTS: u32 = 6;
+const TREE_CHUNK_START: usize = 400;
+const TREE_CHUNK_MIN: usize = 25;
+const BLOB_CACHE_PATH: &str = ".dam/push_blob_cache.json";
+
+fn human_size(n: usize) -> String {
+    let f = n as f64;
+    if f >= 1_048_576.0 {
+        format!("{:.1} MB", f / 1_048_576.0)
+    } else if f >= 1024.0 {
+        format!("{:.0} KB", f / 1024.0)
+    } else {
+        format!("{} B", n)
+    }
+}
 
 pub enum AuthMethod {
     FineGrainedToken {
@@ -95,6 +113,169 @@ impl GitHubSync {
     fn extract_seal_id(msg: &str, fallback_sha: &str) -> String {
         Self::extract_dam_seal_id(msg)
             .unwrap_or_else(|| format!("seal_git_{}", &fallback_sha[..8]))
+    }
+
+    fn blob_cache_key(&self) -> String {
+        format!("{}/{}", self.owner, self.repo)
+    }
+
+    fn read_blob_cache_file() -> HashMap<String, HashMap<String, String>> {
+        fs::read_to_string(BLOB_CACHE_PATH)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// dam-hash -> GitHub blob sha for blobs already uploaded to THIS repo (resume after failure).
+    fn load_blob_cache(&self) -> HashMap<String, String> {
+        Self::read_blob_cache_file()
+            .remove(&self.blob_cache_key())
+            .unwrap_or_default()
+    }
+
+    fn save_blob_cache(&self, cache: &HashMap<String, String>) {
+        let mut all = Self::read_blob_cache_file();
+        all.insert(self.blob_cache_key(), cache.clone());
+        if let Ok(s) = serde_json::to_string(&all) {
+            let _ = fs::write(BLOB_CACHE_PATH, s);
+        }
+    }
+
+    fn clear_blob_cache(&self) {
+        let mut all = Self::read_blob_cache_file();
+        all.remove(&self.blob_cache_key());
+        if let Ok(s) = serde_json::to_string(&all) {
+            let _ = fs::write(BLOB_CACHE_PATH, s);
+        }
+    }
+
+    /// POST with retry/backoff. Retries timeouts, connection errors, 409/404 (fresh-repo
+    /// replication lag), 429, 5xx and secondary rate limits (honouring Retry-After).
+    fn post_retry(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        timeout: Duration,
+        label: &str,
+    ) -> Result<reqwest::blocking::Response, Box<dyn Error>> {
+        use reqwest::StatusCode as S;
+        let mut delay_ms: u64 = 1000;
+        let mut last_err = String::new();
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let mut wait_ms = delay_ms;
+            match self.client.post(url).json(body).timeout(timeout).send() {
+                Ok(res) => {
+                    let st = res.status();
+                    if st.is_success() {
+                        return Ok(res);
+                    }
+                    let retry_after = res
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.trim().parse::<u64>().ok());
+                    let remaining_zero = res
+                        .headers()
+                        .get("x-ratelimit-remaining")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|v| v.trim() == "0")
+                        .unwrap_or(false);
+                    let detail = Self::format_api_response(res);
+                    let lower = detail.to_lowercase();
+
+                    let hard_rate_limit = st == S::FORBIDDEN && remaining_zero && retry_after.is_none();
+                    let retryable = !hard_rate_limit
+                        && (st == S::CONFLICT
+                            || st == S::NOT_FOUND
+                            || st == S::TOO_MANY_REQUESTS
+                            || st.is_server_error()
+                            || (st == S::FORBIDDEN
+                                && (retry_after.is_some() || lower.contains("rate limit"))));
+                    if !retryable {
+                        return Err(format!("{} failed:\n{}", label, detail).into());
+                    }
+                    if let Some(s) = retry_after {
+                        wait_ms = s.max(1) * 1000;
+                    }
+                    last_err = detail;
+                }
+                Err(e) => {
+                    // timeouts / connection resets
+                    last_err = e.to_string();
+                }
+            }
+
+            if attempt < MAX_ATTEMPTS {
+                println!(
+                    "    ↻ {} failed (attempt {}/{}), retrying in {:.1}s...",
+                    label, attempt, MAX_ATTEMPTS, wait_ms as f32 / 1000.0
+                );
+                thread::sleep(Duration::from_millis(wait_ms));
+                delay_ms = (delay_ms * 2).min(15_000);
+            }
+        }
+        Err(format!("{} failed after {} attempts:\n{}", label, MAX_ATTEMPTS, last_err).into())
+    }
+
+    /// Builds the remote tree in chunks: each request uses the previous request's tree as its
+    /// base_tree, so GitHub never has to process thousands of entries in one call (which makes
+    /// it answer 422 "request timed out ... input was too large"). Shrinks chunks on timeout.
+    fn build_tree_incrementally(
+        &self,
+        items: &[serde_json::Value],
+        base: Option<&str>,
+    ) -> Result<String, Box<dyn Error>> {
+        let tree_url = format!(
+            "https://api.github.com/repos/{}/{}/git/trees",
+            self.owner, self.repo
+        );
+        let total = items.len();
+        let mut base_sha: Option<String> = base.map(String::from);
+        let mut chunk_size = TREE_CHUNK_START;
+        let mut pos = 0usize;
+        println!("🌲 Building remote tree ({} entries)...", total);
+
+        while pos < total {
+            let end = (pos + chunk_size).min(total);
+            let mut body = serde_json::json!({ "tree": items[pos..end].to_vec() });
+            if let Some(ref b) = base_sha {
+                body["base_tree"] = serde_json::json!(b);
+            }
+
+            match self.post_retry(&tree_url, &body, Duration::from_secs(180), "tree creation") {
+                Ok(res) => {
+                    let sha = res
+                        .json::<serde_json::Value>()?["sha"]
+                        .as_str()
+                        .ok_or("GitHub returned no sha for the new tree")?
+                        .to_string();
+                    base_sha = Some(sha);
+                    pos = end;
+                    println!("  ✓ tree entries {}/{}", pos, total);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let too_big = msg.contains("HTTP 422")
+                        && (msg.contains("timed out") || msg.contains("too large"));
+                    if too_big && chunk_size > TREE_CHUNK_MIN {
+                        chunk_size = (chunk_size / 2).max(TREE_CHUNK_MIN);
+                        println!(
+                            "  ↳ GitHub timed out on that chunk; retrying with {} entries per request...",
+                            chunk_size
+                        );
+                        continue;
+                    }
+                    if msg.contains("HTTP 422") && !too_big {
+                        // Other 422s usually mean a cached blob no longer exists remotely.
+                        self.clear_blob_cache();
+                        println!("  ⚠️ Cleared the upload-resume cache; re-run the push to re-upload blobs.");
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        base_sha.ok_or_else(|| "Tree build produced no result".into())
     }
 
     fn format_api_response(resp: reqwest::blocking::Response) -> String {
@@ -369,7 +550,9 @@ impl SyncProvider for GitHubSync {
             if resp.status().is_success() {
                 let commits: Vec<serde_json::Value> = resp.json()?;
                 if let Some(head_commit) = commits.first() {
-                    parent_shas.push(head_commit["sha"].as_str().unwrap().to_string());
+                    if let Some(s) = head_commit["sha"].as_str() {
+                        parent_shas.push(s.to_string());
+                    }
                 }
                 for c in &commits {
                     let msg = c["commit"]["message"].as_str().unwrap_or("");
@@ -513,43 +696,104 @@ impl SyncProvider for GitHubSync {
             }
         }
 
+        let total = changed_files.len();
+        let mut blob_cache = self.load_blob_cache();
+        let blob_url = format!(
+            "https://api.github.com/repos/{}/{}/git/blobs",
+            self.owner, self.repo
+        );
         let mut tree_items = Vec::new();
-        for file_entry in changed_files {
+        let mut skipped: Vec<String> = Vec::new();
+        let (mut uploaded, mut reused, mut bytes_sent) = (0usize, 0usize, 0u64);
+        let started = Instant::now();
+        println!("📦 {} file(s) to upload.", total);
+
+        for (i, file_entry) in changed_files.iter().enumerate() {
+            let n = i + 1;
             let obj_path = Path::new(".dam/objects").join(&file_entry.hash);
             if !obj_path.exists() {
                 println!(
-                    "⚠️ Warning: Object {} missing for file {}. Skipping.",
-                    file_entry.hash, file_entry.path
+                    "  [{}/{}] ⚠️ Object {} missing for {}. Skipping.",
+                    n, total, file_entry.hash, file_entry.path
                 );
+                skipped.push(file_entry.path.clone());
                 continue;
             }
 
-            let compressed_file = File::open(obj_path)?;
+            // Resume / dedupe: identical content (or a previous interrupted push) is never re-sent.
+            if let Some(sha) = blob_cache.get(&file_entry.hash) {
+                reused += 1;
+                println!("  [{}/{}] ↺ {} (already uploaded)", n, total, file_entry.path);
+                tree_items.push(serde_json::json!({ "path": file_entry.path, "mode": "100644", "type": "blob", "sha": sha }));
+                continue;
+            }
+
+            let compressed_file = File::open(&obj_path)?;
             let mut decoder = ZlibDecoder::new(compressed_file);
             let mut raw_data = Vec::new();
             decoder.read_to_end(&mut raw_data)?;
+            let raw_len = raw_data.len();
 
-            let b64_content = general_purpose::STANDARD.encode(&raw_data);
-            let blob_url = format!(
-                "https://api.github.com/repos/{}/{}/git/blobs",
-                self.owner, self.repo
-            );
-            let blob_body = serde_json::json!({"content": b64_content, "encoding": "base64"});
-            let res = self.client.post(&blob_url).json(&blob_body).send()?;
-            if !res.status().is_success() {
-                return Err(format!(
-                    "Failed to upload blob for {}: {}",
-                    file_entry.path,
-                    res.text()?
-                )
-                .into());
+            if raw_len > MAX_BLOB_BYTES {
+                println!(
+                    "  [{}/{}] ⛔ {} is {} - over GitHub's 100 MB limit. NOT uploaded.",
+                    n, total, file_entry.path, human_size(raw_len)
+                );
+                skipped.push(file_entry.path.clone());
+                continue;
+            }
+            if raw_len > WARN_BLOB_BYTES {
+                println!("  ⚠️ {} is large ({}); this may take a while.", file_entry.path, human_size(raw_len));
             }
 
-            let sha = res.json::<serde_json::Value>()?["sha"]
+            println!("  [{}/{}] ⬆ {} ({})", n, total, file_entry.path, human_size(raw_len));
+            let b64_content = general_purpose::STANDARD.encode(&raw_data);
+            drop(raw_data);
+            let blob_body = serde_json::json!({ "content": b64_content, "encoding": "base64" });
+            drop(b64_content);
+
+            // Allow more time for bigger files: 60s base + 15s per MB, capped at 15 min.
+            let timeout = Duration::from_secs((60 + (raw_len as u64 / 1_048_576) * 15).min(900));
+            let res = match self.post_retry(
+                &blob_url,
+                &blob_body,
+                timeout,
+                &format!("blob upload for {}", file_entry.path),
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    self.save_blob_cache(&blob_cache); // keep progress for the next attempt
+                    return Err(e);
+                }
+            };
+            let sha = res
+                .json::<serde_json::Value>()?["sha"]
                 .as_str()
-                .unwrap()
+                .ok_or("GitHub returned no sha for the uploaded blob")?
                 .to_string();
+
+            uploaded += 1;
+            bytes_sent += raw_len as u64;
+            blob_cache.insert(file_entry.hash.clone(), sha.clone());
+            if uploaded % 20 == 0 {
+                self.save_blob_cache(&blob_cache);
+            }
             tree_items.push(serde_json::json!({ "path": file_entry.path, "mode": "100644", "type": "blob", "sha": sha }));
+        }
+        self.save_blob_cache(&blob_cache);
+        println!(
+            "✓ Blobs done: {} uploaded ({}), {} reused, {} skipped in {:.1}s.",
+            uploaded,
+            human_size(bytes_sent as usize),
+            reused,
+            skipped.len(),
+            started.elapsed().as_secs_f32()
+        );
+        if !skipped.is_empty() {
+            println!("⚠️ These files were NOT included in the push:");
+            for p in &skipped {
+                println!("    - {}", p);
+            }
         }
         // Explicitly delete files from remote tree that no longer exist in our active seal
         for remote_p in remote_paths {
@@ -563,23 +807,7 @@ impl SyncProvider for GitHubSync {
                 .clone()
                 .ok_or("No file changes detected and no base tree available.")?
         } else {
-            let tree_url = format!(
-                "https://api.github.com/repos/{}/{}/git/trees",
-                self.owner, self.repo
-            );
-            let mut tree_body = serde_json::json!({ "tree": tree_items });
-            if let Some(ref bg_sha) = base_git_sha {
-                tree_body["base_tree"] = serde_json::json!(bg_sha);
-            }
-
-            let res = self.client.post(&tree_url).json(&tree_body).send()?;
-            if !res.status().is_success() {
-                return Err(format!("Failed to create remote Git tree: {}", res.text()?).into());
-            }
-            res.json::<serde_json::Value>()?["sha"]
-                .as_str()
-                .unwrap()
-                .to_string()
+            self.build_tree_incrementally(&tree_items, base_git_sha.as_deref())?
         };
 
         let commit_url = format!(
@@ -598,13 +826,15 @@ impl SyncProvider for GitHubSync {
             commit_body["parents"] = serde_json::json!(parent_shas);
         }
 
-        let res = self.client.post(&commit_url).json(&commit_body).send()?;
-        if !res.status().is_success() {
-            return Err(format!("Failed to commit new tree to GitHub: {}", res.text()?).into());
-        }
+        let res = self.post_retry(
+            &commit_url,
+            &commit_body,
+            Duration::from_secs(120),
+            "commit creation",
+        )?;
         let new_commit_sha = res.json::<serde_json::Value>()?["sha"]
             .as_str()
-            .unwrap()
+            .ok_or("GitHub returned no sha for the new commit")?
             .to_string();
 
         let ref_url = format!(
@@ -633,6 +863,8 @@ impl SyncProvider for GitHubSync {
                 .into());
             }
         }
+
+        self.clear_blob_cache();
 
         println!(
             "✓ Successfully pushed stream '{}' to remote repository natively!",
